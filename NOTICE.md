@@ -4,7 +4,7 @@ This project incorporates material as listed below or described in the code.
 
 ---------------------------
 
-OpenFold
+OpenFoldss
 
                                  Apache License
                            Version 2.0, January 2004
