@@ -6,13 +6,14 @@ import os
 import shutil
 import subprocess
 import sys
+import pickle
 import tempfile
 from pathlib import Path
-
+import glob
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
-
+import numpy as np
 StrPath = str | os.PathLike
 
 
@@ -210,3 +211,58 @@ def get_colabfold_embeds(
         shutil.copy(fasta_file, os.path.join(cache_embeds_dir, f"{seqsha}.fasta"))
 
     return single_rep_file, pair_rep_file
+
+
+def get_PMGen_embeds(
+    id: str,
+    cache_embeds_dir: StrPath | None,# this should be our output_dir/alphafold folder
+    seq_len: int, # required because in PMGen wrapper mode, sequences are padded to maximum lengths
+
+) -> tuple[StrPath, StrPath]:
+    """
+    Uses colabfold to retrieve embeddings for a given sequence. If the embeddings are already stored under `cache_embeds_dir`,
+    the cached embeddings are returned. Otherwise, colabfold is used to compute the embeddings and they are saved under `cache_embeds_dir`.
+    Optionally uses an MSA A3M file if provided.
+
+    Args:
+
+        id: id given by PMGen
+        cache_embeds_dir: Cache directory where embeddings will be stored. If None, defaults to ~/.bioemu_embeds_cache.
+
+    Returns:
+        Tuple of paths to single and pair embeddings.
+    """
+    seqsha = id
+
+    # Setup embedding cache
+    cache_embeds_dir = os.path.join(cache_embeds_dir, id) #or _get_default_embeds_dir()
+    cache_embeds_dir = os.path.expanduser(cache_embeds_dir)
+    cache_embeds_dir = os.path.abspath(cache_embeds_dir)
+    assert os.path.isdir(cache_embeds_dir), f"Path to embedding does not exist {cache_embeds_dir}"
+    os.makedirs(cache_embeds_dir, exist_ok=True)
+
+    # Check whether embeds have already been computed
+    pattern = f"{seqsha}_*_representations.pkl"
+    search_pattern = os.path.join(cache_embeds_dir, pattern)
+    single_rep_file = os.path.join(cache_embeds_dir, f"{seqsha}_single.npy")
+    pair_rep_file = os.path.join(cache_embeds_dir, f"{seqsha}_pair.npy")
+
+    if os.path.exists(single_rep_file) and os.path.exists(pair_rep_file):
+        logger.info(f"Using cached embeddings in {cache_embeds_dir}.")
+        return single_rep_file, pair_rep_file
+    else:
+        matching_files = glob.glob(search_pattern)
+        if matching_files:
+            pickle_file = matching_files[0]
+            logger.info(f"Found pickle file containing embeddings {pickle_file}.")
+            with open(pickle_file, 'rb') as f:
+                data = pickle.load(f)
+                single_rep = np.array(data['single'])
+                pair_rep = np.array(data['pair'])
+            np.save(single_rep_file, single_rep[:seq_len, :])
+            np.save(pair_rep_file, pair_rep[:seq_len, :seq_len, :])
+            del single_rep
+            del pair_rep
+            if os.path.exists(single_rep_file) and os.path.exists(pair_rep_file):
+                return single_rep_file, pair_rep_file
+

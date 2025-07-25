@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from .chemgraph import ChemGraph
 from .convert_chemgraph import save_pdb_and_xtc
-from .get_embeds import get_colabfold_embeds
+from .get_embeds import get_PMGen_embeds
 from .model_utils import load_model, load_sdes, maybe_download_checkpoint
 from .sde_lib import SDE
 from .seq_io import check_protein_valid, parse_sequence, write_fasta
@@ -38,6 +38,7 @@ SUPPORTED_DENOISERS = list(typing.get_args(SupportedDenoisersLiteral))
 @torch.no_grad()
 def main(
     sequence: str | Path,
+    id: str,
     num_samples: int,
     output_dir: str | Path,
     batch_size_100: int = 10,
@@ -57,6 +58,7 @@ def main(
     Args:
         sequence: Amino acid sequence for which to generate samples, or a path to a .fasta file, or a path to an .a3m file with MSAs.
             If it is not an a3m file, then colabfold will be used to generate an MSA and embedding.
+        id: PMGen id.
         num_samples: Number of samples to generate. If `output_dir` already contains samples, this function will only generate additional samples necessary to reach the specified `num_samples`.
         output_dir: Directory to save the samples. Each batch of samples will initially be dumped as .npz files. Once all batches are sampled, they will be converted to .xtc and .pdb.
         batch_size_100: Batch size you'd use for a sequence of length 100. The batch size will be calculated from this, assuming
@@ -139,16 +141,16 @@ def main(
                 f"Not sure why {npz_path} already exists when so far only {existing_num_samples} samples have been generated."
             )
         logger.info(f"Sampling {seed=}")
-        batch = generate_batch(
+        # Added by AmirAsgary --> before here was preprocessing, from here is actually running. Change from here
+        batch = generate_batch_modified(
             score_model=score_model,
             sequence=sequence,
+            id=id,
             sdes=sdes,
             batch_size=min(batch_size, n),
             seed=seed,
             denoiser=denoiser,
             cache_embeds_dir=cache_embeds_dir,
-            msa_file=msa_file,
-            msa_host_url=msa_host_url,
         )
         batch = {k: v.cpu().numpy() for k, v in batch.items()}
         np.savez(npz_path, **batch, sequence=sequence)
@@ -173,23 +175,17 @@ def main(
     logger.info(f"Completed. Your samples are in {output_dir}.")
 
 
-def get_context_chemgraph(
+def get_context_chemgraph_modified(
     sequence: str,
-    cache_embeds_dir: str | Path | None = None,
-    msa_file: str | Path | None = None,
-    msa_host_url: str | None = None,
+    id: str, # PMGen id
+    cache_embeds_dir: str | Path | None = None, #embed file dir uses get_colabfold_embeds
 ) -> ChemGraph:
     n = len(sequence)
-
-    single_embeds_file, pair_embeds_file = get_colabfold_embeds(
-        seq=sequence,
-        cache_embeds_dir=cache_embeds_dir,
-        msa_file=msa_file,
-        msa_host_url=msa_host_url,
-    )
+     # reads embed files
+    single_embeds_file, pair_embeds_file = get_PMGen_embeds(cache_embeds_dir=cache_embeds_dir, id=id, seq_len=n)
     single_embeds = torch.from_numpy(np.load(single_embeds_file))
     pair_embeds = torch.from_numpy(np.load(pair_embeds_file))
-    assert pair_embeds.shape[0] == pair_embeds.shape[1] == n
+    assert pair_embeds.shape[0] == pair_embeds.shape[1] == n, f'id:{id},\npair_embeds.shape[0]{pair_embeds.shape},\nsingle_embeds.shape:{single_embeds.shape},\nn:{n}'
     assert single_embeds.shape[0] == n
     assert len(single_embeds.shape) == 2
     _, _, n_pair_feats = pair_embeds.shape  # [seq_len, seq_len, n_pair_feats]
@@ -216,38 +212,37 @@ def get_context_chemgraph(
     )
 
 
-def generate_batch(
+def generate_batch_modified(
     score_model: torch.nn.Module,
     sequence: str,
+    id : str,
     sdes: dict[str, SDE],
     batch_size: int,
     seed: int,
     denoiser: Callable,
-    cache_embeds_dir: str | Path | None,
-    msa_file: str | Path | None = None,
-    msa_host_url: str | None = None,
+    cache_embeds_dir: str | Path | None, #Added by AmirAsgary --> where colabfold enbeddings exist, uses get_context_chemgraph function
+
 ) -> dict[str, torch.Tensor]:
     """Generate one batch of samples, using GPU if available.
 
     Args:
         score_model: Score model.
         sequence: Amino acid sequence.
+        id: PMGen id
         sdes: SDEs defining corruption process. Keys should be 'node_orientations' and 'pos'.
-        embeddings_file: Path to embeddings file.
+        cache_embeds_dir: Path to embeddings files dir, given by PMGen.
         batch_size: Batch size.
         seed: Random seed.
-        msa_file: Optional path to an MSA A3M file.
-        msa_host_url: MSA server URL for colabfold.
     """
 
     torch.manual_seed(seed)
-
-    context_chemgraph = get_context_chemgraph(
+     # this gets the colabfold embedding and gives them to sampling and diffusion pipline.
+    context_chemgraph = get_context_chemgraph_modified(
         sequence=sequence,
-        cache_embeds_dir=cache_embeds_dir,
-        msa_file=msa_file,
-        msa_host_url=msa_host_url,
+        id=id,
+        cache_embeds_dir=cache_embeds_dir
     )
+    # below no need to modify, just diffusion and sampling pipline
     context_batch = Batch.from_data_list([context_chemgraph] * batch_size)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
